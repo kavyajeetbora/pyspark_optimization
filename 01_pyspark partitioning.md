@@ -48,3 +48,19 @@ Still slow after tuning → likely skew, not fixed by partition count alone.
 - Column choice: **low-to-medium cardinality** (not `customer_id`, not a constant) + **a column queries actually filter on**
 - Multi-level: `partitionBy("date", "hour")` nests in the order given — most-filtered column first
 - Files per folder: `repartition(n)` before `partitionBy` works (forces a shuffle); `coalesce(n)` before it does nothing if the data was already 1 partition, since coalesce can only decrease
+
+
+## Dynamic Partition Pruning (DPP)
+
+Same underlying mechanism as partition pruning above — skip folders that can't match. The only difference is **where the filter values come from**.
+
+| | Static pruning | Dynamic pruning |
+|---|---|---|
+| Filter value known | At query-compile time (hardcoded, or passed in by the user/BI tool) | Only at runtime, computed from the other side of a join |
+| Typical case | `WHERE listen_date = '2023-06-04'` | Join: filter the small side first, use its resulting values to prune the large side |
+
+**Mechanism:** in a join, Spark evaluates the filtered, smaller side first (the side small enough to broadcast). Whatever values survive that filter are then used **as if they were a static filter** on the other, larger side — but only if that larger side is already physically partitioned by the joined column. Spark reuses the broadcast exchange to do this, so it doesn't cost a second scan.
+
+**Automatic** — on by default (`spark.sql.optimizer.dynamicPartitionPruning.enabled = true`). No hint or API call needed; Spark detects the pattern and inserts a `dynamic pruning expression` into the physical plan itself.
+
+**Gotcha:** requires the large table to already be partitioned on the join key. If it isn't — or the join is on a different, unpartitioned column — there are no folders to skip, and Spark falls back to a full scan.
